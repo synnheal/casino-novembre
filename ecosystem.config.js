@@ -1,16 +1,7 @@
 module.exports = {
   apps: [
-    {
-      name: 'backend',
-      script: './server/index.mjs',  // ⬅️ Change .js en .mjs
-      instances: 1,
-      autorestart: true,
-      watch: false,
-      env: {
-        NODE_ENV: 'production',
-        PORT: 8007
-      }
-    },
+    // Backend désactivé - Le jeu Crash fonctionne maintenant en local
+    // Plus besoin de serveur Socket.io séparé
     {
       name: 'frontend',
       script: 'node_modules/.bin/next',

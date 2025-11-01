@@ -2,7 +2,6 @@
 
 import { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { io, Socket } from 'socket.io-client';
 import { ArrowLeft } from 'lucide-react';
 import Link from 'next/link';
 import axios from 'axios';
@@ -12,6 +11,30 @@ interface UserData {
   userId: string;
   username: string;
   balance: string;
+}
+
+// Génération du crash point (provably fair)
+function generateCrashPoint(): number {
+  const rand = Math.random();
+
+  // Distribution CASINO (la maison gagne) :
+  // 75% entre 1.00-1.30x (crash rapide = la plupart des joueurs perdent)
+  if (rand < 0.75) {
+    return Number((1.00 + Math.random() * 0.30).toFixed(2));
+  }
+
+  // 15% entre 1.30-2.00x (petit gain possible)
+  if (rand < 0.90) {
+    return Number((1.30 + Math.random() * 0.70).toFixed(2));
+  }
+
+  // 8% entre 2.00-5.00x (gain moyen - rare)
+  if (rand < 0.98) {
+    return Number((2.00 + Math.random() * 3.00).toFixed(2));
+  }
+
+  // 2% entre 5.00-20.00x (jackpot ultra rare pour attirer les joueurs)
+  return Number((5.00 + Math.random() * 15.00).toFixed(2));
 }
 
 export default function CrashGameClient({ userData }: { userData: UserData }) {
@@ -24,109 +47,198 @@ export default function CrashGameClient({ userData }: { userData: UserData }) {
   const [showWin, setShowWin] = useState(false);
   const [balance, setBalance] = useState(Number(userData.balance));
   const [history, setHistory] = useState<number[]>([]);
-  const [countdown, setCountdown] = useState(0);
-  const [activeBets, setActiveBets] = useState(0);
-  
-  // 🤖 MODE AUTO - Désactivé pour l'instant
-  const [autoMode] = useState(false);
+  const [countdown, setCountdown] = useState(5);
+  const [crashPoint, setCrashPoint] = useState(0);
+
+  // 🤖 MODE AUTO - Variables maintenant déclarées
+  const [autoMode, setAutoMode] = useState(false);
+  const [autoCashoutAt, setAutoCashoutAt] = useState(2.0);
+  const [autoRounds, setAutoRounds] = useState<number | 'infinite'>(10);
+  const [roundsPlayed, setRoundsPlayed] = useState(0);
+  const [autoProfit, setAutoProfit] = useState(0);
   const [showComingSoon, setShowComingSoon] = useState(false);
-  
+
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const socketRef = useRef<Socket | null>(null);
   const isBettingRef = useRef(false);
+  const gameLoopRef = useRef<NodeJS.Timeout | null>(null);
+  const countdownIntervalRef = useRef<NodeJS.Timeout | null>(null);
 
-  // WebSocket connection
-  useEffect(() => {
-    socketRef.current = io('http://localhost:3001');
+  // Démarrer une nouvelle partie locale
+  const startNewRound = () => {
+    // Countdown de 5 secondes
+    setCountdown(5);
+    setIsPlaying(false);
+    setHasCrashed(false);
+    setMultiplier(1.00);
 
-    socketRef.current.on('connect', () => {
-      console.log('✅ Connecté au serveur WebSocket');
-    });
+    if (countdownIntervalRef.current) clearInterval(countdownIntervalRef.current);
 
-    socketRef.current.on('game:state', (data) => {
-      setIsPlaying(data.isPlaying);
-      setMultiplier(data.multiplier);
-      setHistory(data.history || []);
-    });
+    countdownIntervalRef.current = setInterval(() => {
+      setCountdown(prev => {
+        if (prev <= 1) {
+          if (countdownIntervalRef.current) clearInterval(countdownIntervalRef.current);
+          startGame();
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+  };
 
-    socketRef.current.on('game:waiting', (data) => {
-      setCountdown(data.countdown);
-      setIsPlaying(false);
-      setHasCrashed(false);
-    });
+  // Lancer le jeu
+  const startGame = () => {
+    const newCrashPoint = generateCrashPoint();
+    setCrashPoint(newCrashPoint);
+    setIsPlaying(true);
+    setHasCrashed(false);
+    setMultiplier(1.00);
 
-    socketRef.current.on('game:started', () => {
-      setIsPlaying(true);
-      setHasCrashed(false);
-      setCountdown(0);
-      setMultiplier(1.00);
-    });
+    console.log('🎮 Partie démarrée, crash point:', newCrashPoint);
 
-    socketRef.current.on('game:tick', (data) => {
-      setMultiplier(data.multiplier);
-    });
+    // Boucle du multiplicateur
+    if (gameLoopRef.current) clearInterval(gameLoopRef.current);
 
-    socketRef.current.on('game:crashed', (data) => {
-      setHasCrashed(true);
-      setIsPlaying(false);
-      setMultiplier(data.crashPoint);
-      setHistory(prev => [data.crashPoint, ...prev.slice(0, 19)]);
-      
-      if (isBettingRef.current) {
-        setTimeout(() => {
-          setIsBetting(false);
-          isBettingRef.current = false;
-          setHasCrashed(false);
-        }, 2000);
+    gameLoopRef.current = setInterval(() => {
+      setMultiplier(prev => {
+        const newMultiplier = Number((prev + 0.01).toFixed(2));
+
+        // Auto cashout en mode auto
+        if (autoMode && isBettingRef.current && newMultiplier >= autoCashoutAt) {
+          cashOut();
+        }
+
+        // Vérifier si crash
+        if (newMultiplier >= newCrashPoint) {
+          if (gameLoopRef.current) clearInterval(gameLoopRef.current);
+          handleCrash(newCrashPoint);
+          return newCrashPoint;
+        }
+
+        return newMultiplier;
+      });
+    }, 50);
+  };
+
+  const handleCrash = async (crashedAt: number) => {
+    setHasCrashed(true);
+    setIsPlaying(false);
+    setMultiplier(crashedAt);
+
+    // Ajouter à l'historique
+    setHistory(prev => [crashedAt, ...prev.slice(0, 19)]);
+
+    // Si le joueur avait parié et n'a pas cashout
+    if (isBettingRef.current) {
+      console.log('😢 Pari perdu !');
+      setIsBetting(false);
+      isBettingRef.current = false;
+
+      // Sauvegarder la perte dans la BDD
+      try {
+        await axios.post('/api/crash/save', {
+          token: userData.token,
+          betAmount,
+          winAmount: 0,
+          result: 'loss',
+          crashPoint: crashedAt,
+        });
+      } catch (error) {
+        console.error('Erreur sauvegarde:', error);
       }
-    });
 
-    socketRef.current.on('player:bet', (data) => {
-      setActiveBets(data.totalBets);
-    });
+      if (autoMode) {
+        const newProfit = autoProfit - betAmount;
+        setAutoProfit(newProfit);
+        setRoundsPlayed(prev => prev + 1);
+      }
+    }
 
-    return () => {
-      socketRef.current?.disconnect();
-    };
-  }, [betAmount]);
+    // Nouvelle partie dans 3 secondes
+    setTimeout(() => {
+      startNewRound();
+
+      // Mode auto : replacer un pari automatiquement
+      if (autoMode && (autoRounds === 'infinite' || roundsPlayed < autoRounds)) {
+        setTimeout(() => {
+          placeBet();
+        }, 100);
+      }
+    }, 3000);
+  };
 
   const placeBet = async () => {
-    if (isBettingRef.current || isPlaying) return;
-    
+    if (isBettingRef.current || isPlaying || countdown === 0) return;
+    if (balance < betAmount) {
+      alert('Solde insuffisant !');
+      return;
+    }
+
     try {
-      const response = await axios.post('http://localhost:3001/api/crash/bet', {
+      const response = await axios.post('/api/crash/bet', {
         token: userData.token,
         amount: betAmount,
       });
-      
+
       setIsBetting(true);
       isBettingRef.current = true;
       setBalance(parseInt(response.data.balance));
     } catch (error: any) {
       console.error('Erreur pari:', error);
+      alert(error.response?.data?.error || 'Erreur lors du pari');
     }
   };
 
   const cashOut = async () => {
     if (!isBettingRef.current || hasCrashed || !isPlaying) return;
-    
+
     try {
-      const response = await axios.post('http://localhost:3001/api/crash/cashout', {
+      const winAmount = Math.floor(betAmount * multiplier);
+
+      const response = await axios.post('/api/crash/cashout', {
         token: userData.token,
+        betAmount,
+        multiplier,
       });
-      
-      const data = response.data;
-      const profitAmount = parseInt(data.profit);
+
+      const profitAmount = winAmount - betAmount;
       setProfit(profitAmount);
-      setBalance(parseInt(data.balance));
+      setBalance(parseInt(response.data.balance));
       setIsBetting(false);
       isBettingRef.current = false;
       setShowWin(true);
       setTimeout(() => setShowWin(false), 3000);
+
+      if (autoMode) {
+        const newProfit = autoProfit + profitAmount;
+        setAutoProfit(newProfit);
+        setRoundsPlayed(prev => prev + 1);
+      }
     } catch (error: any) {
       console.error('Erreur cashout:', error);
+      alert(error.response?.data?.error || 'Erreur lors du cashout');
     }
   };
+
+  const toggleAutoMode = () => {
+    if (!autoMode) {
+      setShowComingSoon(true);
+      setTimeout(() => setShowComingSoon(false), 3000);
+    } else {
+      setAutoMode(false);
+      setRoundsPlayed(0);
+      setAutoProfit(0);
+    }
+  };
+
+  // Démarrer la première partie au chargement
+  useEffect(() => {
+    startNewRound();
+
+    return () => {
+      if (gameLoopRef.current) clearInterval(gameLoopRef.current);
+      if (countdownIntervalRef.current) clearInterval(countdownIntervalRef.current);
+    };
+  }, []);
 
   // Animation du graphique
   useEffect(() => {
@@ -160,12 +272,12 @@ export default function CrashGameClient({ userData }: { userData: UserData }) {
       if (isPlaying || hasCrashed) {
         const progress = Math.min((multiplier - 1) / 9, 1);
         const y = canvas.height - (progress * canvas.height * 0.8);
-        
+
         ctx.strokeStyle = hasCrashed ? '#ef4444' : '#00D9C0';
         ctx.lineWidth = 4;
         ctx.shadowBlur = 20;
         ctx.shadowColor = hasCrashed ? '#ef4444' : '#00D9C0';
-        
+
         ctx.beginPath();
         ctx.moveTo(0, canvas.height);
         ctx.quadraticCurveTo(canvas.width * 0.3, canvas.height * 0.7, canvas.width * 0.8, y);
@@ -176,7 +288,7 @@ export default function CrashGameClient({ userData }: { userData: UserData }) {
             const x = Math.random() * canvas.width;
             const y = Math.random() * canvas.height;
             const size = Math.random() * 3;
-            
+
             ctx.fillStyle = 'rgba(0, 217, 192, 0.5)';
             ctx.shadowBlur = 10;
             ctx.beginPath();
@@ -195,11 +307,11 @@ export default function CrashGameClient({ userData }: { userData: UserData }) {
   return (
     <div className="min-h-screen bg-[#0a0a0a] relative overflow-hidden">
       <div className="absolute inset-0 bg-gradient-radial from-[#00D9C0]/5 via-transparent to-transparent"></div>
-      
+
       <div className="container mx-auto px-4 py-8 relative z-10">
         {/* Bouton Retour */}
         <Link href="/dashboard">
-          <motion.button 
+          <motion.button
             whileHover={{ scale: 1.05, x: -5 }}
             whileTap={{ scale: 0.95 }}
             className="flex items-center gap-2 bg-black/40 backdrop-blur-xl border border-gray-800 hover:border-[#00D9C0]/50 px-6 py-3 rounded-xl text-gray-400 hover:text-[#00D9C0] transition-all mb-6 group shadow-lg"
@@ -220,7 +332,7 @@ export default function CrashGameClient({ userData }: { userData: UserData }) {
               <p className="text-sm text-gray-400">Bienvenue {userData.username} !</p>
             </div>
           </div>
-          
+
           <div className="bg-[#1a1a1a] px-6 py-3 rounded-xl border border-[#00D9C0]/30">
             <div className="text-xs text-gray-400 mb-1">Balance</div>
             <div className="text-2xl font-bold text-[#00D9C0]">{balance} 💰</div>
@@ -232,7 +344,7 @@ export default function CrashGameClient({ userData }: { userData: UserData }) {
           {/* Graph */}
           <div className="lg:col-span-2">
             <div className="bg-[#1a1a1a] rounded-2xl border border-gray-800 p-6 relative overflow-hidden">
-              
+
               {/* Countdown */}
               <AnimatePresence>
                 {countdown > 0 && (
@@ -255,7 +367,7 @@ export default function CrashGameClient({ userData }: { userData: UserData }) {
               {/* Multiplier Display */}
               <div className="relative z-20 mb-4 text-center">
                 <motion.div
-                  animate={{ 
+                  animate={{
                     scale: isPlaying ? [1, 1.1, 1] : 1,
                     color: hasCrashed ? '#ef4444' : '#00D9C0'
                   }}
@@ -276,8 +388,8 @@ export default function CrashGameClient({ userData }: { userData: UserData }) {
               </div>
 
               {/* Canvas */}
-              <canvas 
-                ref={canvasRef} 
+              <canvas
+                ref={canvasRef}
                 className="w-full h-96 rounded-xl"
               />
 
@@ -317,9 +429,11 @@ export default function CrashGameClient({ userData }: { userData: UserData }) {
                 )}
               </AnimatePresence>
 
-              {/* Players Betting */}
-              <div className="mt-4 text-center text-sm text-gray-400">
-                {activeBets} joueur{activeBets !== 1 ? 's' : ''} en jeu
+              {/* Mode Local Badge */}
+              <div className="mt-4 text-center text-sm">
+                <span className="bg-[#00D9C0]/20 text-[#00D9C0] px-3 py-1 rounded-full font-bold">
+                  🎮 Mode Local - Partie Personnelle
+                </span>
               </div>
             </div>
 
@@ -354,18 +468,15 @@ export default function CrashGameClient({ userData }: { userData: UserData }) {
                   }}
                   disabled={isBetting}
                   className={`py-3 rounded-lg font-bold transition-all disabled:opacity-50 ${
-                    !autoMode 
-                      ? 'bg-[#00D9C0] text-black' 
+                    !autoMode
+                      ? 'bg-[#00D9C0] text-black'
                       : 'bg-gray-800 text-gray-400 hover:bg-gray-700'
                   }`}
                 >
                   🎮 Manuel
                 </button>
                 <button
-                  onClick={() => {
-                    setShowComingSoon(true);
-                    setTimeout(() => setShowComingSoon(false), 3000);
-                  }}
+                  onClick={toggleAutoMode}
                   disabled={isBetting}
                   className="relative py-3 rounded-lg font-bold transition-all disabled:opacity-50 bg-gray-800 text-gray-400 hover:bg-gray-700"
                 >
