@@ -281,7 +281,7 @@ export default function PlinkoGameClient({ userData }: { userData: UserData }) {
 
   return (
     <div className="min-h-screen bg-[#0a0a0a] relative overflow-hidden">
-      <div className="absolute inset-0 bg-gradient-radial from-[#00D9C0]/5 via-transparent to-transparent"></div>
+      <div className="absolute inset-0 bg-gradient-to-br from-[#00D9C0]/5 via-transparent to-transparent"></div>
       
       <div className="container mx-auto px-4 py-8 relative z-10">
         {/* Header */}
